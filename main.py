@@ -78,7 +78,7 @@ def main():
     changed_submissions = []
 
     for new, old in zip(new_submissions, previous_submissions):
-        if new and old and new[0].revision != old.revision:
+        if new and old and new[0] != old:
             changed_submissions.append(new)
         elif new and not old:
             changed_submissions.append(new)
