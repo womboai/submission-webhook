@@ -1,6 +1,5 @@
 from struct import pack, unpack
 
-
 _UINT_16_SIZE = 2
 _UINT_32_SIZE = 4
 
@@ -25,6 +24,9 @@ class Encoder:
 
         self._data.append(len(data))
         self._data.extend(data)
+
+    def write_sized_str(self, data: str):
+        self._data.extend(data.encode())
 
     def finish(self):
         if len(self._data) > 128:
@@ -66,3 +68,13 @@ class Decoder:
         self._position += length
 
         return value.decode()
+
+    def read_sized_str(self, length: int):
+        value = self._data[self._position:self._position + length]
+        self._position += length
+
+        return value.decode()
+
+    @property
+    def eof(self):
+        return self._position >= len(self._data)

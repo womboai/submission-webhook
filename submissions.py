@@ -1,16 +1,17 @@
 import time
-import traceback
 from enum import Enum
-from typing import cast, Any
-from tqdm import tqdm
+from operator import itemgetter
+from typing import cast, Any, Annotated
 
 import bittensor as bt
 from bittensor.extrinsics.serving import get_metadata
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from tqdm import tqdm
 
 from network_commitments import Decoder, Encoder
 
-SPEC_VERSION = 4
+SPEC_VERSION = 5
+REVISION_LENGTH = 7
 
 
 class ContestId(Enum):
@@ -21,22 +22,24 @@ class ContestId(Enum):
 
 class CheckpointSubmission(BaseModel):
     repository: str
-    revision: str
+    revision: Annotated[str, Field(min_length=REVISION_LENGTH, max_length=REVISION_LENGTH)]
     contest: ContestId
 
     def encode(self, encoder: Encoder):
+        encoder.write_str(self.provider)
         encoder.write_str(self.repository)
-        encoder.write_str(self.revision)
+        encoder.write_sized_str(self.revision)
         encoder.write_uint16(self.contest.value)
 
     @classmethod
     def decode(cls, decoder: Decoder):
+        provider = decoder.read_str()
         repository = decoder.read_str()
-        revision = decoder.read_str()
+        revision = decoder.read_sized_str(REVISION_LENGTH)
         contest_id = ContestId(decoder.read_uint16())
 
         return cls(
-            repository=repository,
+            repository=f"https://{provider}/{repository}",
             revision=revision,
             contest=contest_id,
         )
@@ -58,13 +61,15 @@ class CheckpointSubmission(BaseModel):
         ))
 
 
-def get_miner_submissions(subtensor: bt.subtensor, metagraph: bt.metagraph, current_block: int) -> list[tuple[CheckpointSubmission, int] | None]:
+def get_miner_submissions(subtensor: bt.subtensor, metagraph: bt.metagraph) -> list[tuple[CheckpointSubmission, int] | None]:
     visited_repositories: dict[str, tuple[int, int]] = {}
+    visited_revisions: dict[str, tuple[int, int]] = {}
 
     miner_info: list[tuple[CheckpointSubmission, int] | None] = []
 
     for uid in tqdm(range(metagraph.n.item())):
         hotkey = metagraph.hotkeys[uid]
+
         error: Exception | None = None
 
         for attempt in range(3):
@@ -78,7 +83,6 @@ def get_miner_submissions(subtensor: bt.subtensor, metagraph: bt.metagraph, curr
                     subtensor,
                     metagraph,
                     hotkey,
-                    current_block,
                 )
 
                 break
@@ -95,7 +99,13 @@ def get_miner_submissions(subtensor: bt.subtensor, metagraph: bt.metagraph, curr
 
         info, block = submission
 
-        existing_submission = visited_repositories.get(info.repository)
+        existing_repository_submission = visited_repositories.get(info.repository)
+        existing_revision_submission = visited_revisions.get(info.revision)
+
+        if existing_repository_submission and existing_revision_submission:
+            existing_submission = min(existing_repository_submission, existing_revision_submission, key=itemgetter(1))
+        else:
+            existing_submission = existing_repository_submission or existing_revision_submission
 
         if existing_submission:
             existing_uid, existing_block = existing_submission
@@ -108,6 +118,7 @@ def get_miner_submissions(subtensor: bt.subtensor, metagraph: bt.metagraph, curr
 
         miner_info.append((info, block))
         visited_repositories[info.repository] = uid, block
+        visited_revisions[info.revision] = uid, block
 
         time.sleep(0.2)
 
@@ -118,10 +129,9 @@ def get_submission(
         subtensor: bt.subtensor,
         metagraph: bt.metagraph,
         hotkey: str,
-        block: int | None = None
 ) -> tuple[CheckpointSubmission, int] | None:
     try:
-        metadata = cast(dict[str, Any], get_metadata(subtensor, metagraph.netuid, hotkey, block))
+        metadata = cast(dict[str, Any], get_metadata(subtensor, metagraph.netuid, hotkey))
 
         if not metadata:
             return None
@@ -137,10 +147,16 @@ def get_submission(
         if spec_version != SPEC_VERSION:
             return None
 
-        info = CheckpointSubmission.decode(decoder)
+        while not decoder.eof:
+            info = CheckpointSubmission.decode(decoder)
 
-        return info, block
+            if spec_version != SPEC_VERSION:
+                continue
+
+            return info, block
+
+        return None
     except Exception as e:
-        bt.logging.error(f"Failed to get submission from miner {hotkey}, {e}")
-        bt.logging.debug(f"Submission parsing error, {traceback.format_exception(e)}")
+        bt.logging.error(f"Failed to get submission from miner {hotkey}")
+        bt.logging.error(f"Submission parsing error", exc_info=e)
         return None

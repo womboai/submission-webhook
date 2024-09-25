@@ -13,8 +13,13 @@ SAVE_FILE_PATH = "submissions.json"
 subtensor = bt.subtensor()
 metagraph = bt.metagraph(netuid=39)
 
+bt.logging.disable_logging()
 
-def send_webhook(block: int, uid: int, hotkey: str, submission: CheckpointSubmission):
+
+def send_webhook(block: int, uid: int, hotkey: str, coldkey: str, submission: CheckpointSubmission):
+    revision_link = f"[{submission.revision}]({f'{submission.repository}/commit/{submission.revision}'})"
+    if not submission.repository.startswith("https://"):
+        revision_link = submission.revision
     embed = {
         "title": f"New Miner Submission",
         "color": 0x9F2B68,
@@ -23,10 +28,11 @@ def send_webhook(block: int, uid: int, hotkey: str, submission: CheckpointSubmis
                 "name": f"Contest: {submission.contest.name}",
                 "value":
                     f"- **Repository**: {submission.repository}\n"
-                    f"- **Revision**: [{submission.revision}]({f'{submission.repository}/commit/{submission.revision}'})\n"
+                    f"- **Revision**: {revision_link}\n"
                     f"- **Block**: `{block}`\n"
                     f"- **UID**: `{uid}`\n"
-                    f"- **Hotkey**: `{hotkey}`"
+                    f"- **Hotkey**: `{hotkey}`\n"
+                    f"- **Coldkey**: `{coldkey}`"
             }
         ]
     }
@@ -60,7 +66,7 @@ def load_submissions() -> list[CheckpointSubmission | None]:
 
 def save_submissions(submissions: list[tuple[CheckpointSubmission, int] | None]):
     with open(SAVE_FILE_PATH, "w") as f:
-        data: list[CheckpointSubmission | None] = []
+        data: list[dict] = []
         for uid, submission in enumerate(submissions):
             if submission:
                 data.append(submission[0].to_json(uid))
@@ -68,12 +74,11 @@ def save_submissions(submissions: list[tuple[CheckpointSubmission, int] | None])
 
 
 def main():
-    current_block = subtensor.get_current_block()
     previous_submissions = load_submissions()
 
     print(f"Loading {len([sub for sub in previous_submissions if sub])} previous submissions")
 
-    new_submissions: list[tuple[CheckpointSubmission, int] | None] = get_miner_submissions(subtensor, metagraph, current_block)
+    new_submissions: list[tuple[CheckpointSubmission, int] | None] = get_miner_submissions(subtensor, metagraph)
 
     changed_submissions = []
 
@@ -89,8 +94,9 @@ def main():
         for uid, submission in enumerate(new_submissions):
             if submission and submission in changed_submissions:
                 hotkey = metagraph.hotkeys[uid]
-                send_webhook(submission[1], uid, hotkey, submission[0])
-                sleep(1)  # avoid rate limiting
+                coldkey = metagraph.coldkeys[uid]
+                send_webhook(submission[1], uid, hotkey, coldkey, submission[0])
+                sleep(1 if len(new_submissions) < 30 else 5)  # avoid rate limiting
 
     print(
         f"Found {len([sub for sub in new_submissions if sub])} submissions\n"
